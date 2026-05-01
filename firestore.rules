@@ -1,0 +1,11 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Only authenticated users can read/write the hinker collection
+    match /hinker/{docId} {
+      allow read, write: if request.auth != null;
+    }
+
+  }
+}
