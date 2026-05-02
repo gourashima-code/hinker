@@ -951,6 +951,17 @@ export default function App() {
     fetchScore(user, top).then(r => { setScores(s => ({ ...s, [top.id]:r })); setScoreLd(s => ({ ...s, [top.id]:false })); });
   }, [top?.id, user?.jobTitle, user?.skills]);
 
+  const empAvailable = allApplicants.filter(a => !empSwiped.includes(a.id || a.email) && a.role !== "employer" && a.email !== user?.email);
+  const empTop = role === "employer" ? empAvailable[0] : null;
+
+  useEffect(() => {
+    if (!empTop || !user || role !== "employer") return;
+    const key = empTop.email || empTop.id;
+    if (scores[key] || scoreLd[key]) return;
+    setScoreLd(s => ({ ...s, [key]:true }));
+    fetchScore(empTop, user).then(r => { setScores(s => ({ ...s, [key]:r })); setScoreLd(s => ({ ...s, [key]:false })); });
+  }, [empTop?.email, empTop?.id, user?.company, user?.industry]);
+
   const draggingRef = useRef(false);
   const dragXRef    = useRef(0);
   const onPointerDown = e => {
@@ -1394,9 +1405,11 @@ export default function App() {
                     ) : (
                       <Av src={dTop.photo} initials={dTop.initials} color={dTop.color} size={52} fs={18}/>
                     )}
-                    <div style={{background:`${ACCENT2}20`,border:`1px solid ${ACCENT2}40`,borderRadius:20,padding:"4px 10px",fontSize:11,fontWeight:700,color:ACCENT2}}>
-                      <ScoreBadge id={isApp ? dTop.id : (dTop.email||dTop.id)}/>
-                    </div>
+                    {(scores[isApp ? dTop.id : (dTop.email||dTop.id)] || scoreLd[isApp ? dTop.id : (dTop.email||dTop.id)]) && (
+                      <div style={{background:`${ACCENT2}20`,border:`1px solid ${ACCENT2}40`,borderRadius:20,padding:"4px 10px",fontSize:11,fontWeight:700,color:ACCENT2}}>
+                        <ScoreBadge id={isApp ? dTop.id : (dTop.email||dTop.id)}/>
+                      </div>
+                    )}
                   </div>
                   {/* Bottom: name + tags */}
                   <div style={{display:"flex",flexDirection:"column",gap:4}}>
