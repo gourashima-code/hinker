@@ -739,6 +739,12 @@ export default function App() {
           if (newOnes.length > 0) setNewMatchModal({ count: newOnes.length });
         }
         await db.set("hk_last_login_"+email, new Date().toISOString());
+        // Remove employer accounts from applicant pool (cleans up stale entries)
+        if (r === "employer") {
+          const all = await db.get("hk_all_applicants") || [];
+          const cleaned = all.filter(a => a.email !== email);
+          if (cleaned.length !== all.length) await db.set("hk_all_applicants", cleaned);
+        }
       } else {
         setVerifyPending(false);
         setRole(null); setUser(null);
