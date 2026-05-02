@@ -745,6 +745,19 @@ export default function App() {
           const cleaned = all.filter(a => a.email !== email);
           if (cleaned.length !== all.length) await db.set("hk_all_applicants", cleaned);
         }
+        // One-time global cleanup: check all entries against stored roles
+        const cleanupDone = await db.get("hk_cleanup_roles_v1");
+        if (!cleanupDone) {
+          await db.set("hk_cleanup_roles_v1", true);
+          const all = await db.get("hk_all_applicants") || [];
+          const cleaned = [];
+          for (const a of all) {
+            if (a.role === "employer") continue;
+            const storedRole = await db.get("hk_role_" + a.email);
+            if (storedRole !== "employer") cleaned.push(a);
+          }
+          if (cleaned.length !== all.length) await db.set("hk_all_applicants", cleaned);
+        }
       } else {
         setVerifyPending(false);
         setRole(null); setUser(null);
