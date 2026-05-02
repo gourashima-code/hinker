@@ -1003,10 +1003,12 @@ export default function App() {
           }
         }
       }
-      // Add to employer's candidate pool
-      const prev = await db.get("hk_all_applicants") || [];
-      if (!prev.find(a => a.email === user.email && a.jobId === job.id)) {
-        await save("hk_all_applicants", [...prev, { ...user, jobId:job.id, company_job:job.company, matchedAt:new Date().toLocaleDateString("de-DE"), id:Date.now() + Math.random() }], setAllApplicants);
+      // Add to employer's candidate pool (only applicants)
+      if (role === "applicant") {
+        const prev = await db.get("hk_all_applicants") || [];
+        if (!prev.find(a => a.email === user.email && a.jobId === job.id)) {
+          await save("hk_all_applicants", [...prev, { ...user, role:"applicant", jobId:job.id, company_job:job.company, matchedAt:new Date().toLocaleDateString("de-DE"), id:Date.now() + Math.random() }], setAllApplicants);
+        }
       }
     }
   };
@@ -1277,7 +1279,7 @@ export default function App() {
     const isApp = role === "applicant";
     const available = isApp
       ? empJobs.filter(j => !appSwiped.includes(j.id))
-      : allApplicants.filter(a => !empSwiped.includes(a.id || a.email));
+      : allApplicants.filter(a => !empSwiped.includes(a.id || a.email) && a.role !== "employer" && a.email !== user.email);
     const filtered = isApp ? available.filter(j =>
       (swipeFilters.industry === "Alle" || j.industry === swipeFilters.industry) &&
       (swipeFilters.workType === "Alle" || j.workType === swipeFilters.workType) &&
