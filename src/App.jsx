@@ -4,6 +4,8 @@ import { getFirestore, doc, getDoc, setDoc, deleteDoc, onSnapshot } from "fireba
 import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut, onAuthStateChanged, sendPasswordResetEmail, sendEmailVerification, deleteUser } from "firebase/auth";
 import { getDatabase, ref as rtdbRef, set as rtdbSet, onDisconnect, onValue } from "firebase/database";
 import { getMessaging, getToken } from "firebase/messaging";
+import { getFunctions, httpsCallable } from "firebase/functions";
+import { getStorage, ref as storageRef, uploadBytes, getDownloadURL, deleteObject } from "firebase/storage";
 
 // ── Firebase ────────────────────────────────────────────────────────────────────
 const FIREBASE_CONFIG = {
@@ -45,6 +47,23 @@ function getFireMsg() {
     _fireMsg = getMessaging(app);
   } catch(e) { console.warn("FCM not available:", e.message); }
   return _fireMsg;
+}
+let _fireFn = null, _fireStore = null;
+function getFireFn() {
+  if (_fireFn) return _fireFn;
+  try {
+    const app = getApps().length ? getApps()[0] : initializeApp(FIREBASE_CONFIG);
+    _fireFn = getFunctions(app, "europe-west1");
+  } catch(e) { console.warn("Functions not available:", e.message); }
+  return _fireFn;
+}
+function getFireStore() {
+  if (_fireStore) return _fireStore;
+  try {
+    const app = getApps().length ? getApps()[0] : initializeApp(FIREBASE_CONFIG);
+    _fireStore = getStorage(app);
+  } catch(e) { console.warn("Storage not available:", e.message); }
+  return _fireStore;
 }
 const AUTH_ERRORS = {
   "auth/email-already-in-use": "E-Mail bereits registriert.",
@@ -170,28 +189,14 @@ const DEMO_JOBS = [
 
 const initColor = name => COLORS_LIST[(name || "A").charCodeAt(0) % COLORS_LIST.length];
 
-// ── Claude AI match scoring ─────────────────────────────────────────────────────
+// ── Claude AI match scoring — via Cloud Function (API key stays server-side) ───
 async function fetchScore(user, job) {
   try {
-    const res = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": import.meta.env.VITE_ANTHROPIC_API_KEY,
-        "anthropic-version": "2023-06-01",
-        "anthropic-dangerous-direct-browser-access": "true",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-6",
-        max_tokens: 120,
-        messages: [{
-          role: "user",
-          content: `Job-Match 0-100.\nKandidat: ${user.jobTitle || "?"}, Skills: ${user.skills || "keine"}, Standort: ${user.location || "?"}, Radius: ${user.radius || "25 km"}\nStelle: ${job.company}, ${job.industry}, sucht: ${job.hiring}, Standort: ${job.location || "?"}, Gehalt: ${job.salary || "k.A."}, Modell: ${job.workType || "?"}\nNur JSON (kein Markdown): {"score":75,"reason":"Max 10 Wörter Deutsch"}`,
-        }],
-      }),
-    });
-    const d = await res.json();
-    return JSON.parse(d.content.map(c => c.text || "").join("").replace(/```json|```/g, "").trim());
+    const fn = getFireFn();
+    if (!fn) throw new Error("no functions");
+    const call = httpsCallable(fn, "scoreMatch");
+    const res  = await call({ user, job });
+    return res.data;
   } catch {
     return { score: Math.floor(Math.random() * 30 + 55), reason: "Gute Übereinstimmung mit Anforderungen" };
   }
@@ -503,8 +508,17 @@ const JobDetailModal = ({ open, onClose, job, score, onHire, onSkip }) => {
   );
 };
 
-const ApplicantDetailModal = ({ open, onClose, appl, onChat, isMatched }) => {
+const ApplicantDetailModal = ({ open, onClose, appl, onChat, isMatched, matchStatus, onStatusChange }) => {
   if (!appl) return null;
+  const APP_STATUS_COLORS = {
+    "Neu":        { color:"#6B7280", bg:"#F3F4F6", icon:"🆕" },
+    "Eingeladen": { color:"#2563EB", bg:"#EFF6FF", icon:"📩" },
+    "Interview":  { color:"#D97706", bg:"#FFFBEB", icon:"🤝" },
+    "Eingestellt":{ color:"#059669", bg:"#ECFDF5", icon:"✅" },
+    "Abgelehnt":  { color:"#DC2626", bg:"#FEF2F2", icon:"❌" },
+  };
+  const currentStatus = matchStatus || "Neu";
+  const st = APP_STATUS_COLORS[currentStatus];
   return (
     <Overlay open={open} onClose={onClose}>
       <ModalHead title="👤 Bewerber-Profil" onClose={onClose} />
@@ -520,6 +534,40 @@ const ApplicantDetailModal = ({ open, onClose, appl, onChat, isMatched }) => {
       <div style={{ ...S.card, marginBottom:16, padding:"0.5rem 1rem" }}>
         {[["📧","E-Mail",appl.email],["📍","Standort",appl.location||"–"],["🎯","Suchradius",appl.radius||"–"]].map(([i,l,v],idx,a) => <InfoRow key={l} icon={i} label={l} value={v} last={idx === a.length - 1} />)}
       </div>
+
+      {/* Status — only shown when matched */}
+      {isMatched && onStatusChange && (
+        <div style={{ marginBottom:16 }}>
+          <p style={{ fontSize:11, fontWeight:700, color:"#9CA3AF", marginBottom:8, textTransform:"uppercase", letterSpacing:"0.08em" }}>Status</p>
+          <div style={{ display:"flex", flexWrap:"wrap", gap:6 }}>
+            {Object.entries(APP_STATUS_COLORS).map(([s, c]) => (
+              <button key={s} onClick={() => onStatusChange(s)}
+                style={{ padding:"6px 12px", borderRadius:20, border:`2px solid ${currentStatus===s ? c.color : "transparent"}`, background:c.bg, color:c.color, fontSize:12, fontWeight:700, cursor:"pointer", fontFamily:"inherit", opacity:currentStatus===s?1:0.55 }}>
+                {c.icon} {s}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Shared documents */}
+      {appl.sharedDocs?.length > 0 && (
+        <div style={{ marginBottom:16 }}>
+          <p style={{ fontSize:11, fontWeight:700, color:"#9CA3AF", marginBottom:8, textTransform:"uppercase", letterSpacing:"0.08em" }}>📎 Unterlagen</p>
+          {appl.sharedDocs.map((d,i) => (
+            <a key={i} href={d.url || "#"} target="_blank" rel="noopener noreferrer"
+              style={{ display:"flex", gap:10, alignItems:"center", padding:"10px 12px", background:"#F9FAFB", borderRadius:10, marginBottom:6, textDecoration:"none", border:"1px solid #E5E7EB" }}>
+              <span style={{ fontSize:20 }}>📄</span>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:13, fontWeight:600, color:"#111827" }}>{d.name}</div>
+                <div style={{ fontSize:11, color:"#9CA3AF" }}>{d.size} · {d.date}</div>
+              </div>
+              {d.url && <span style={{ fontSize:14, color:ACCENT2, fontWeight:700 }}>↓</span>}
+            </a>
+          ))}
+        </div>
+      )}
+
       {isMatched
         ? <Btn variant="green" onClick={() => { onChat(appl); onClose(); }}>💬 Nachricht schreiben</Btn>
         : <p style={{ textAlign:"center", fontSize:13, color:"#9CA3AF", margin:0 }}>💡 Chat wird nach einem Match freigeschaltet</p>}
@@ -618,11 +666,18 @@ export default function App() {
   const [tab,           setTab]           = useState("discover");
   const [onboarded,     setOnboarded]     = useState(() => !!localStorage.getItem("hk_onboarded"));
   const [onboardIdx,    setOnboardIdx]    = useState(0);
-  const startX      = useRef(0);
-  const startY      = useRef(0);
-  const hasDragged  = useRef(false);
-  const photoRef    = useRef(null);
-  const docRef      = useRef(null);
+  const [acctDeleting,  setAcctDeleting]  = useState(false);
+  const [acctDeleteErr, setAcctDeleteErr] = useState("");
+  const [aboToast,      setAboToast]      = useState(false);
+  const [faqOpen,       setFaqOpen]       = useState(null);
+  const [typingPartner, setTypingPartner] = useState(false);
+  const [partnerReading,setPartnerReading]= useState(false);
+  const startX          = useRef(0);
+  const startY          = useRef(0);
+  const hasDragged      = useRef(false);
+  const photoRef        = useRef(null);
+  const docRef          = useRef(null);
+  const typingTimeoutRef = useRef(null);
 
   useEffect(() => {
     const style = document.createElement("style");
@@ -738,6 +793,28 @@ export default function App() {
     });
     return () => unsub();
   }, [user?.email]);
+
+  // Typing indicator + read receipt listener per open chat
+  useEffect(() => {
+    if (!chatOpen?.partnerEmail || !user?.email) { setTypingPartner(false); setPartnerReading(false); return; }
+    const rtdb = getFireRtdb();
+    if (!rtdb) return;
+    const ck  = "chat_" + [user.email, chatOpen.partnerEmail].sort().join("__").replace(/[@.]/g, "_");
+    const pk  = chatOpen.partnerEmail.replace(/[@.]/g, "_");
+    const mk  = user.email.replace(/[@.]/g, "_");
+    // Mark self as reading this chat
+    const readRef = rtdbRef(rtdb, `reading/${ck}/${mk}`);
+    rtdbSet(readRef, true);
+    onDisconnect(readRef).set(false);
+    // Watch partner typing
+    const unsub1 = onValue(rtdbRef(rtdb, `typing/${ck}/${pk}`),  snap => setTypingPartner(!!snap.val()));
+    // Watch partner reading
+    const unsub2 = onValue(rtdbRef(rtdb, `reading/${ck}/${pk}`), snap => setPartnerReading(!!snap.val()));
+    return () => {
+      rtdbSet(readRef, false);
+      unsub1(); unsub2();
+    };
+  }, [chatOpen?.partnerEmail, user?.email]);
 
   // FCM push notification permission
   useEffect(() => {
@@ -964,6 +1041,13 @@ export default function App() {
     const myMsg = { from:user.email, text:txt, t:time };
     const next = [...prev, myMsg];
     await db.set(key, next); setChatMsgs(next);
+    // Clear own typing indicator
+    clearTimeout(typingTimeoutRef.current);
+    const rtdb = getFireRtdb();
+    if (rtdb) {
+      const ck = "chat_" + [user.email, chatOpen.partnerEmail].sort().join("__").replace(/[@.]/g, "_");
+      await rtdbSet(rtdbRef(rtdb, `typing/${ck}/${user.email.replace(/[@.]/g, "_")}`), false);
+    }
     // Store last message preview in match entries so InboxTab can show it
     const preview = { text:txt, t:time, from:user.email };
     if (role === "applicant") {
@@ -978,12 +1062,33 @@ export default function App() {
   };
 
   const handlePhoto  = async e => { const f = e.target.files?.[0]; if (!f) return; const b = await resizeImg(f); await saveU({ ...user, photo:b }); };
-  const handleDoc    = async e => {
+  const handleDoc = async e => {
     const files = Array.from(e.target.files || []); if (!files.length) return;
+    const storage = getFireStore();
     const prev = await db.get("hk_app_docs_"+user.email) || [];
-    await save("hk_app_docs_"+user.email, [...prev, ...files.map(f => ({ name:f.name, size:Math.round(f.size/1024)+"KB", type:f.type, date:new Date().toLocaleDateString("de-DE"), id:Date.now()+Math.random() }))], setAppDocs);
+    const newDocs = await Promise.all(files.map(async f => {
+      const id   = Date.now() + Math.random();
+      const path = `docs/${user.email}/${id}_${f.name}`;
+      let url = null;
+      if (storage) {
+        try {
+          const ref = storageRef(storage, path);
+          await uploadBytes(ref, f);
+          url = await getDownloadURL(ref);
+        } catch(err) { console.warn("Storage upload:", err.message); }
+      }
+      return { name:f.name, size:Math.round(f.size/1024)+"KB", type:f.type, date:new Date().toLocaleDateString("de-DE"), id, url, path };
+    }));
+    await save("hk_app_docs_"+user.email, [...prev, ...newDocs], setAppDocs);
   };
-  const removeDoc    = async id => save("hk_app_docs_"+user.email, appDocs.filter(d => d.id !== id), setAppDocs);
+  const removeDoc = async id => {
+    const d = appDocs.find(doc => doc.id === id);
+    if (d?.path) {
+      const storage = getFireStore();
+      if (storage) await deleteObject(storageRef(storage, d.path)).catch(() => {});
+    }
+    await save("hk_app_docs_"+user.email, appDocs.filter(d => d.id !== id), setAppDocs);
+  };
   const handleSaveJob = async job => {
     const prev = await db.get("hk_emp_jobs") || [];
     const isNew = !editJob;
@@ -993,6 +1098,34 @@ export default function App() {
     await addNotif("hk_emp_notifs_"+user.email, setEmpNotifs, { icon:"📝", title:isNew ? "Neue Stelle veröffentlicht" : "Stelle aktualisiert", body:job.company + " – " + job.hiring.slice(0,40) });
   };
   const deleteJob = async id => save("hk_emp_jobs", empJobs.filter(j => j.id !== id), setEmpJobs);
+
+  const APP_STATUS = {
+    "Neu":        { color:"#6B7280", bg:"#F3F4F6", icon:"🆕" },
+    "Eingeladen": { color:"#2563EB", bg:"#EFF6FF", icon:"📩" },
+    "Interview":  { color:"#D97706", bg:"#FFFBEB", icon:"🤝" },
+    "Eingestellt":{ color:"#059669", bg:"#ECFDF5", icon:"✅" },
+    "Abgelehnt":  { color:"#DC2626", bg:"#FEF2F2", icon:"❌" },
+  };
+
+  const setMatchStatus = async (appEmail, jobId, empEmail, status) => {
+    const empM = await db.get("hk_emp_matches_"+empEmail) || [];
+    await save("hk_emp_matches_"+empEmail, empM.map(m => m.candidate?.email === appEmail && m.job?.id === jobId ? { ...m, status } : m), setEmpMatches);
+    const appM = await db.get("hk_app_matches_"+appEmail) || [];
+    await db.set("hk_app_matches_"+appEmail, appM.map(m => m.id === jobId ? { ...m, empStatus:status } : m));
+    if (status !== "Neu") {
+      const icons = { "Eingeladen":"📩","Interview":"🤝","Eingestellt":"✅","Abgelehnt":"❌" };
+      await addNotif("hk_app_notifs_"+appEmail, ()=>{}, { icon:icons[status]||"📋", title:`Status geändert: ${status}`, body:`Neue Rückmeldung von ${empEmail}` });
+    }
+  };
+
+  const shareDocsWithMatch = async (m) => {
+    const docs = appDocs.map(d => ({ name:d.name, size:d.size, type:d.type, url:d.url||null, date:d.date }));
+    const matches = await db.get("hk_app_matches_"+user.email) || [];
+    await save("hk_app_matches_"+user.email, matches.map(x => x.id === m.id ? { ...x, sharedDocs:docs } : x), setAppMatches);
+    const empM = await db.get("hk_emp_matches_"+m.employerId) || [];
+    await db.set("hk_emp_matches_"+m.employerId, empM.map(x => x.candidate?.email === user.email ? { ...x, candidate:{ ...x.candidate, sharedDocs:docs } } : x));
+    await addNotif("hk_emp_notifs_"+m.employerId, setEmpNotifs, { icon:"📎", title:`${user.name} hat Unterlagen geteilt`, body:"Öffne das Bewerber-Profil zum Ansehen." });
+  };
 
   const unreadApp = appNotifs.filter(n => !n.read).length;
   const unreadEmp = empNotifs.filter(n => !n.read).length;
@@ -1107,6 +1240,12 @@ export default function App() {
         onSkip={() => { setShowCardDetail(false); doSwipe("left"); }} />
       <ApplicantDetailModal open={showApplicant} onClose={() => setShowApplicant(false)} appl={viewApplicant}
         isMatched={!!viewApplicant && empMatches.some(m => m.candidate?.email === viewApplicant.email)}
+        matchStatus={viewApplicant ? (empMatches.find(m => m.candidate?.email === viewApplicant.email)?.status || "Neu") : "Neu"}
+        onStatusChange={async (status) => {
+          if (!viewApplicant) return;
+          const m = empMatches.find(x => x.candidate?.email === viewApplicant.email);
+          if (m) await setMatchStatus(viewApplicant.email, m.job?.id, user.email, status);
+        }}
         onChat={a => { setChatOpen({ id:a.email, name:a.name, company:a.email, avatar:a.initials, color:a.color, partnerEmail:a.email }); setScreen("emp_chat"); }} />
       <ConfirmDialog />
       <NewMatchModal data={newMatchModal} onClose={() => setNewMatchModal(null)} onGoToMatches={() => { setTab("matches"); setNewMatchModal(null); }} />
@@ -1373,6 +1512,9 @@ export default function App() {
             const partner  = isApp ? m.employerId          : m.candidate?.email;
             const online   = isOnline(partner);
             const isNew    = !m.lastMsg;
+            const mStatus  = !isApp ? (m.status || "Neu") : null;
+            const mStInfo  = mStatus ? APP_STATUS[mStatus] : null;
+            const hasShared = isApp && m.sharedDocs?.length > 0;
             return (
               <div key={i} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 0",borderBottom:`1px solid ${t.border}`}}>
                 {/* Avatar with online indicator */}
@@ -1383,9 +1525,14 @@ export default function App() {
                 {/* Content — click opens chat */}
                 <div onClick={() => { setChatOpen({ id:partner, name, color, avatar:initials, partnerEmail:partner, jobId: isApp ? m.id : m.job?.id }); setScreen(isApp?"app_chat":"emp_chat"); }}
                   style={{flex:1,minWidth:0,cursor:"pointer"}}>
-                  <div style={{display:"flex",alignItems:"center",gap:6}}>
+                  <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
                     <div style={{fontSize:15,fontWeight:700,color:t.text}}>{name}</div>
                     {isNew && <span style={{fontSize:10,fontWeight:700,background:`${ACCENT}15`,color:ACCENT,padding:"2px 7px",borderRadius:20,flexShrink:0}}>Neu</span>}
+                    {mStInfo && mStatus !== "Neu" && (
+                      <span style={{fontSize:10,fontWeight:700,background:mStInfo.bg,color:mStInfo.color,padding:"2px 7px",borderRadius:20,flexShrink:0}}>
+                        {mStInfo.icon} {mStatus}
+                      </span>
+                    )}
                   </div>
                   <div style={{fontSize:12,color:t.text2,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",marginTop:1}}>
                     {m.lastMsg
@@ -1402,8 +1549,18 @@ export default function App() {
                     </button>
                   )}
                   {isApp && (
-                    <button onClick={e => { e.stopPropagation(); handleUnmatch({ appEmail:user.email, jobId:m.id, empEmail:m.employerId }); }}
-                      style={{background:"rgba(255,80,80,0.08)",border:"1px solid rgba(255,80,80,0.2)",borderRadius:8,width:28,height:28,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13}}>✕</button>
+                    <>
+                      {hasShared ? (
+                        <span style={{fontSize:10,fontWeight:700,color:ACCENT2,background:`${ACCENT2}15`,border:`1px solid ${ACCENT2}30`,borderRadius:8,padding:"4px 8px",flexShrink:0}}>📎 geteilt</span>
+                      ) : (
+                        <button onClick={e => { e.stopPropagation(); shareDocsWithMatch(m); }}
+                          style={{background:"rgba(0,201,167,0.08)",border:"1px solid rgba(0,201,167,0.25)",borderRadius:8,padding:"5px 10px",cursor:"pointer",fontSize:12,fontWeight:700,color:ACCENT2,fontFamily:"inherit",flexShrink:0}}>
+                          📎 Teilen
+                        </button>
+                      )}
+                      <button onClick={e => { e.stopPropagation(); handleUnmatch({ appEmail:user.email, jobId:m.id, empEmail:m.employerId }); }}
+                        style={{background:"rgba(255,80,80,0.08)",border:"1px solid rgba(255,80,80,0.2)",borderRadius:8,width:28,height:28,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13}}>✕</button>
+                    </>
                   )}
                   <span style={{fontSize:16,color:t.text3}}>›</span>
                 </div>
@@ -1466,6 +1623,27 @@ export default function App() {
     const stats = isApp
       ? [{ label:"Swipes", val:appSwiped.length }, { label:"Matches", val:appMatches.length }, { label:"Docs", val:appDocs.length }]
       : [{ label:"Stellen", val:empJobs.filter(j=>j.employerId===user.email).length }, { label:"Matches", val:empMatches.length }, { label:"Chats", val:Object.keys(empMsgs).length }];
+
+    const strengthItems = isApp ? [
+      { label:"Name",            done: !!user.name },
+      { label:"Berufsbezeichnung", done: !!user.jobTitle },
+      { label:"Skills",          done: !!user.skills },
+      { label:"Bio / Vorstellung", done: !!user.bio },
+      { label:"Standort",        done: !!user.location },
+      { label:"Profilfoto",      done: !!user.photo },
+      { label:"Dokument hochgeladen", done: appDocs.length > 0 },
+    ] : [
+      { label:"Name",            done: !!user.name },
+      { label:"Unternehmen",     done: !!user.company },
+      { label:"Branche",         done: !!user.industry },
+      { label:"Unternehmensinfo", done: !!user.companyDesc },
+      { label:"Standort",        done: !!user.location },
+      { label:"Profilfoto",      done: !!user.photo },
+      { label:"Stelle veröffentlicht", done: empJobs.some(j => j.employerId === user.email) },
+    ];
+    const doneCount = strengthItems.filter(x => x.done).length;
+    const strengthPct = Math.round((doneCount / strengthItems.length) * 100);
+    const strengthColor = strengthPct >= 80 ? ACCENT2 : strengthPct >= 50 ? "#f59e0b" : ACCENT;
     return (
       <div style={{width:"100%",display:"flex",flexDirection:"column",background:t.bg,minHeight:"100%"}}>
         <div style={{padding:"14px 20px 10px",display:"flex",alignItems:"center",justifyContent:"space-between",flexShrink:0}}>
@@ -1492,6 +1670,24 @@ export default function App() {
                 </div>
               ))}
             </div>
+          </div>
+
+          {/* Profile strength */}
+          <div style={{background:t.card,border:`1px solid ${t.border}`,borderRadius:16,padding:"16px",marginBottom:12}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+              <span style={{fontSize:13,fontWeight:700,color:t.text}}>Profilstärke</span>
+              <span style={{fontSize:13,fontWeight:800,color:strengthColor}}>{strengthPct}%</span>
+            </div>
+            <div style={{height:6,borderRadius:99,background:t.bg3,overflow:"hidden",marginBottom:10}}>
+              <div style={{height:"100%",borderRadius:99,width:`${strengthPct}%`,background:`linear-gradient(90deg,${strengthColor},${strengthColor}cc)`,transition:"width 0.6s ease"}}/>
+            </div>
+            {strengthPct < 100 && (
+              <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                {strengthItems.filter(x => !x.done).map((x,i) => (
+                  <span key={i} style={{fontSize:11,fontWeight:600,color:t.text3,background:t.bg3,border:`1px solid ${t.border}`,borderRadius:20,padding:"3px 9px"}}>+ {x.label}</span>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Recruiter: Post a Job */}
@@ -1542,53 +1738,80 @@ export default function App() {
   };
 
   // ── Chat screen ────────────────────────────────────────────────────────────────
-  const ChatUI = () => (
-    <div style={{width:"100%",height:"100vh",display:"flex",flexDirection:"column",background:t.bg}}>
-      <div style={{padding:"12px 16px",display:"flex",alignItems:"center",gap:12,borderBottom:`1px solid ${t.border}`,flexShrink:0}}>
-        <button onClick={() => setScreen("home")} style={{background:"none",border:"none",cursor:"pointer",color:t.text2,fontSize:22,padding:"4px",display:"flex",alignItems:"center"}}>‹</button>
-        <Av initials={chatOpen?.avatar} color={chatOpen?.color} size={36} fs={13}/>
-        <div style={{flex:1}}>
-          <div style={{fontSize:15,fontWeight:700,color:t.text}}>{chatOpen?.name}</div>
-          <div style={{fontSize:11,color:ACCENT2,fontWeight:600}}>Online</div>
-        </div>
-        <button onClick={() => {
-          const isApp = role === "applicant";
-          handleUnmatch({
-            appEmail: isApp ? user.email : chatOpen.partnerEmail,
-            jobId:    chatOpen.jobId,
-            empEmail: isApp ? chatOpen.partnerEmail : user.email,
-          });
-        }} style={{background:"rgba(255,80,80,0.08)",border:"1px solid rgba(255,80,80,0.22)",borderRadius:10,padding:"6px 12px",cursor:"pointer",fontSize:12,fontWeight:700,color:ACCENT,fontFamily:"inherit",flexShrink:0}}>
-          Unmatch
-        </button>
-      </div>
-      <div style={{flex:1,overflowY:"auto",padding:"12px 16px",display:"flex",flexDirection:"column",gap:8}}>
-        {chatMsgs.length === 0 && <p style={{color:t.text3,fontSize:14,textAlign:"center",marginTop:60}}>Schreib die erste Nachricht 👋</p>}
-        {chatMsgs.map((m,i) => (
-          <div key={i} style={{display:"flex",justifyContent:m.from===user.email?"flex-end":"flex-start"}}>
-            <div style={{maxWidth:"78%",padding:"10px 14px",
-              borderRadius:16,
-              borderBottomRightRadius:m.from===user.email?4:16,
-              borderBottomLeftRadius:m.from!==user.email?4:16,
-              background:m.from===user.email?`linear-gradient(135deg,${ACCENT},${ACCENT}bb)`:t.bg3,
-              color:m.from===user.email?"#fff":t.text,
-              fontSize:14,fontWeight:500,lineHeight:1.5}}>
-              {m.text}
-              <div style={{fontSize:10,opacity:0.55,marginTop:3,textAlign:"right"}}>{m.t}</div>
+  const ChatUI = () => {
+    const isPartnerOnline = chatOpen?.partnerEmail ? !!onlineUsers[chatOpen.partnerEmail] : false;
+    const lastSentIdx = chatMsgs.reduce((acc, m, i) => m.from === user.email ? i : acc, -1);
+
+    const handleTyping = (e) => {
+      setMsgInput(e.target.value);
+      if (!chatOpen?.partnerEmail || !user?.email) return;
+      const rtdb = getFireRtdb(); if (!rtdb) return;
+      const ck = "chat_" + [user.email, chatOpen.partnerEmail].sort().join("__").replace(/[@.]/g, "_");
+      const mk = user.email.replace(/[@.]/g, "_");
+      rtdbSet(rtdbRef(rtdb, `typing/${ck}/${mk}`), true);
+      clearTimeout(typingTimeoutRef.current);
+      typingTimeoutRef.current = setTimeout(() => rtdbSet(rtdbRef(rtdb, `typing/${ck}/${mk}`), false), 2000);
+    };
+
+    return (
+      <div style={{width:"100%",height:"100vh",display:"flex",flexDirection:"column",background:t.bg}}>
+        <div style={{padding:"12px 16px",display:"flex",alignItems:"center",gap:12,borderBottom:`1px solid ${t.border}`,flexShrink:0}}>
+          <button onClick={() => setScreen("home")} style={{background:"none",border:"none",cursor:"pointer",color:t.text2,fontSize:22,padding:"4px",display:"flex",alignItems:"center"}}>‹</button>
+          <Av initials={chatOpen?.avatar} color={chatOpen?.color} size={36} fs={13}/>
+          <div style={{flex:1}}>
+            <div style={{fontSize:15,fontWeight:700,color:t.text}}>{chatOpen?.name}</div>
+            <div style={{fontSize:11,fontWeight:600,color:typingPartner?ACCENT:isPartnerOnline?ACCENT2:t.text3,transition:"color 0.2s"}}>
+              {typingPartner ? "tippt…" : isPartnerOnline ? "Online" : "Offline"}
             </div>
           </div>
-        ))}
+          <button onClick={() => {
+            const isApp = role === "applicant";
+            handleUnmatch({
+              appEmail: isApp ? user.email : chatOpen.partnerEmail,
+              jobId:    chatOpen.jobId,
+              empEmail: isApp ? chatOpen.partnerEmail : user.email,
+            });
+          }} style={{background:"rgba(255,80,80,0.08)",border:"1px solid rgba(255,80,80,0.22)",borderRadius:10,padding:"6px 12px",cursor:"pointer",fontSize:12,fontWeight:700,color:ACCENT,fontFamily:"inherit",flexShrink:0}}>
+            Unmatch
+          </button>
+        </div>
+        <div style={{flex:1,overflowY:"auto",padding:"12px 16px",display:"flex",flexDirection:"column",gap:8}}>
+          {chatMsgs.length === 0 && <p style={{color:t.text3,fontSize:14,textAlign:"center",marginTop:60}}>Schreib die erste Nachricht 👋</p>}
+          {chatMsgs.map((m,i) => {
+            const isOwn = m.from === user.email;
+            const isLast = i === lastSentIdx;
+            return (
+              <div key={i} style={{display:"flex",flexDirection:"column",alignItems:isOwn?"flex-end":"flex-start"}}>
+                <div style={{maxWidth:"78%",padding:"10px 14px",
+                  borderRadius:16,
+                  borderBottomRightRadius:isOwn?4:16,
+                  borderBottomLeftRadius:!isOwn?4:16,
+                  background:isOwn?`linear-gradient(135deg,${ACCENT},${ACCENT}bb)`:t.bg3,
+                  color:isOwn?"#fff":t.text,
+                  fontSize:14,fontWeight:500,lineHeight:1.5}}>
+                  {m.text}
+                  <div style={{fontSize:10,opacity:0.55,marginTop:3,textAlign:"right"}}>{m.t}</div>
+                </div>
+                {isOwn && isLast && (
+                  <div style={{fontSize:10,color:partnerReading?ACCENT2:t.text3,marginTop:2,fontWeight:600}}>
+                    {partnerReading ? "✓✓ gelesen" : "✓ gesendet"}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+        <div style={{padding:"10px 12px",borderTop:`1px solid ${t.border}`,display:"flex",gap:8,flexShrink:0,background:t.bg}}>
+          <input value={msgInput} onChange={handleTyping}
+            onKeyDown={e => e.key==="Enter" && msgInput.trim() && sendMsg()}
+            placeholder="Nachricht schreiben…"
+            style={{flex:1,height:42,borderRadius:21,border:`1.5px solid ${t.border}`,background:t.bg3,color:t.text,fontSize:14,padding:"0 16px",outline:"none",fontFamily:"inherit"}}/>
+          <button onClick={sendMsg} disabled={!msgInput.trim()}
+            style={{width:42,height:42,borderRadius:"50%",border:"none",background:`linear-gradient(135deg,${ACCENT},${ACCENT}bb)`,cursor:msgInput.trim()?"pointer":"not-allowed",opacity:msgInput.trim()?1:0.5,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>↑</button>
+        </div>
       </div>
-      <div style={{padding:"10px 12px",borderTop:`1px solid ${t.border}`,display:"flex",gap:8,flexShrink:0,background:t.bg}}>
-        <input value={msgInput} onChange={e => setMsgInput(e.target.value)}
-          onKeyDown={e => e.key==="Enter" && msgInput.trim() && sendMsg()}
-          placeholder="Nachricht schreiben…"
-          style={{flex:1,height:42,borderRadius:21,border:`1.5px solid ${t.border}`,background:t.bg3,color:t.text,fontSize:14,padding:"0 16px",outline:"none",fontFamily:"inherit"}}/>
-        <button onClick={sendMsg} disabled={!msgInput.trim()}
-          style={{width:42,height:42,borderRadius:"50%",border:"none",background:`linear-gradient(135deg,${ACCENT},${ACCENT}bb)`,cursor:msgInput.trim()?"pointer":"not-allowed",opacity:msgInput.trim()?1:0.5,display:"flex",alignItems:"center",justifyContent:"center",fontSize:18,flexShrink:0}}>↑</button>
-      </div>
-    </div>
-  );
+    );
+  };
 
   // ── Notifications screen ───────────────────────────────────────────────────────
   const NotifUI = () => {
@@ -1653,11 +1876,17 @@ export default function App() {
         ) : appDocs.map(d => (
           <div key={d.id} style={{background:t.card,borderRadius:14,padding:"14px 16px",display:"flex",gap:12,alignItems:"center",border:`1px solid ${t.border}`}}>
             <div style={{fontSize:28}}>📄</div>
-            <div style={{flex:1}}>
-              <div style={{fontSize:14,fontWeight:700,color:t.text}}>{d.name}</div>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:14,fontWeight:700,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{d.name}</div>
               <div style={{fontSize:12,color:t.text3}}>{d.size} · {d.date}</div>
             </div>
-            <button onClick={() => removeDoc(d.id)} style={{background:"rgba(255,80,80,0.08)",border:"none",borderRadius:8,width:30,height:30,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,color:ACCENT}}>×</button>
+            {d.url && (
+              <a href={d.url} target="_blank" rel="noreferrer"
+                style={{background:`${ACCENT2}15`,border:`1px solid ${ACCENT2}30`,borderRadius:8,padding:"5px 10px",cursor:"pointer",fontSize:12,fontWeight:700,color:ACCENT2,textDecoration:"none",flexShrink:0}}>
+                ↓
+              </a>
+            )}
+            <button onClick={() => removeDoc(d.id)} style={{background:"rgba(255,80,80,0.08)",border:"none",borderRadius:8,width:30,height:30,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:16,color:ACCENT,flexShrink:0}}>×</button>
           </div>
         ))}
       </div>
@@ -1666,8 +1895,8 @@ export default function App() {
 
   // ── Datenschutz screen ─────────────────────────────────────────────────────────
   const DatenschutzUI = () => {
-    const [deleting, setDeleting] = useState(false);
-    const [deleteErr, setDeleteErr] = useState("");
+    const deleting  = acctDeleting;
+    const deleteErr = acctDeleteErr;
     const sections = [
       { icon:"📋", title:"Was wir speichern", body:"Name, E-Mail-Adresse, Profilfoto, Berufsbezeichnung, Skills, Standort, Bewerbungsunterlagen (Dateinamen) sowie deine Match- und Chat-Verläufe. Keine Zahlungsdaten." },
       { icon:"🔒", title:"Datenspeicherung", body:"Alle Daten liegen verschlüsselt in Google Firebase (EU-Rechenzentrum, Frankfurt). Firebase ist ISO 27001 zertifiziert und DSGVO-konform." },
@@ -1707,9 +1936,9 @@ export default function App() {
             <button disabled={deleting} onClick={() => {
               setConfirmMsg("Account wirklich löschen? Alle Daten, Matches und Chats werden dauerhaft entfernt.");
               setConfirmCb(() => async () => {
-                setConfirmCb(null); setDeleting(true);
+                setConfirmCb(null); setAcctDeleting(true);
                 try { await handleDeleteAccount(); }
-                catch(e) { setDeleteErr("Fehler: " + e.message); setDeleting(false); }
+                catch(e) { setAcctDeleteErr("Fehler: " + e.message); setAcctDeleting(false); }
               });
             }} style={{width:"100%",padding:"12px",borderRadius:12,border:"1.5px solid rgba(220,38,38,0.4)",background:"rgba(220,38,38,0.08)",color:"#DC2626",fontWeight:700,fontSize:14,cursor:deleting?"default":"pointer",fontFamily:"inherit",opacity:deleting?0.6:1}}>
               {deleting ? "Wird gelöscht…" : "Account unwiderruflich löschen"}
@@ -1722,7 +1951,7 @@ export default function App() {
 
   // ── Abo screen ─────────────────────────────────────────────────────────────────
   const AboUI = () => {
-    const [showToast, setShowToast] = useState(false);
+    const showToast = aboToast;
     const proFeatures = [
       { icon:"🤖", label:"Unbegrenzte KI-Match-Scores" },
       { icon:"⚡", label:"Priorität in der Discover-Liste" },
@@ -1770,7 +1999,7 @@ export default function App() {
                 <span style={{marginLeft:"auto",fontSize:14,color:ACCENT2}}>✓</span>
               </div>
             ))}
-            <button onClick={() => { setShowToast(true); setTimeout(() => setShowToast(false), 3000); }}
+            <button onClick={() => { setAboToast(true); setTimeout(() => setAboToast(false), 3000); }}
               style={{width:"100%",marginTop:18,padding:"14px",borderRadius:14,border:"none",background:`linear-gradient(135deg,${ACCENT},${ACCENT}bb)`,color:"#fff",fontWeight:800,fontSize:15,cursor:"pointer",fontFamily:"inherit",boxShadow:`0 8px 24px ${ACCENT}44`}}>
               Pro freischalten →
             </button>
@@ -1793,7 +2022,7 @@ export default function App() {
 
   // ── Support screen ─────────────────────────────────────────────────────────────
   const SupportUI = () => {
-    const [openFaq, setOpenFaq] = useState(null);
+    const openFaq = faqOpen;
     const faqs = [
       { q:"Wie funktioniert das Swipen?", a:"Wische eine Karte nach rechts (♥ Hire), um Interesse zu zeigen, oder nach links (✕ Skip), um sie zu überspringen. Du kannst auch die Schaltflächen unter der Karte nutzen." },
       { q:"Wie entsteht ein Match?", a:"Ein Match entsteht sofort, wenn du eine Stelle nach rechts swipest (als Bewerber). Arbeitgeber können ebenfalls Kandidaten liken — sobald beide Interesse zeigen, wird der Chat freigeschaltet." },
@@ -1815,7 +2044,7 @@ export default function App() {
           <div style={{background:t.card,border:`1px solid ${t.border}`,borderRadius:16,overflow:"hidden",marginBottom:20}}>
             {faqs.map((f,i) => (
               <div key={i} style={{borderBottom:i < faqs.length-1 ? `1px solid ${t.border}` : "none"}}>
-                <button onClick={() => setOpenFaq(openFaq === i ? null : i)}
+                <button onClick={() => setFaqOpen(faqOpen === i ? null : i)}
                   style={{width:"100%",padding:"14px 16px",background:"none",border:"none",cursor:"pointer",display:"flex",alignItems:"center",gap:10,fontFamily:"inherit",textAlign:"left"}}>
                   <span style={{flex:1,fontSize:14,fontWeight:600,color:t.text}}>{f.q}</span>
                   <span style={{fontSize:16,color:t.text3,flexShrink:0,transition:"transform 0.2s",transform:openFaq===i?"rotate(90deg)":"none"}}>›</span>
