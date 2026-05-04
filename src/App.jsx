@@ -640,6 +640,7 @@ export default function App() {
   const [showCardDetail,  setShowCardDetail]  = useState(false);
   const [cardDetailItem,  setCardDetailItem]  = useState(null);
   const [swipeFilters,    setSwipeFilters]    = useState({ industry:"Alle", workType:"Alle", level:"Alle", radius:"Alle" });
+  const [empJobFilter,    setEmpJobFilter]    = useState("Alle");
   const [newMatchModal,   setNewMatchModal]   = useState(null);
   const [onlineUsers,     setOnlineUsers]     = useState({});
   const [notifEnabled,    setNotifEnabled]    = useState(() => localStorage.getItem("hk_notif") !== "0");
@@ -1307,15 +1308,22 @@ export default function App() {
   // ── Discover tab ───────────────────────────────────────────────────────────────
   const DiscoverTab = () => {
     const isApp = role === "applicant";
+    const myJobs = empJobs.filter(j => j.employerId === user.email);
+    const myJobIds = myJobs.map(j => j.id);
     const available = isApp
       ? empJobs.filter(j => !appSwiped.includes(j.id))
-      : allApplicants.filter(a => !empSwiped.includes(a.id || a.email) && a.role !== "employer" && a.email !== user.email);
+      : allApplicants.filter(a =>
+          !empSwiped.includes(a.id || a.email) &&
+          a.role !== "employer" &&
+          a.email !== user.email &&
+          myJobIds.includes(a.jobId)
+        );
     const filtered = isApp ? available.filter(j =>
       (swipeFilters.industry === "Alle" || j.industry === swipeFilters.industry) &&
       (swipeFilters.workType === "Alle" || j.workType === swipeFilters.workType) &&
       (swipeFilters.level    === "Alle" || j.level    === swipeFilters.level) &&
       (swipeFilters.radius   === "Alle" || cityDist(user?.location, j.location) <= radiusKm(swipeFilters.radius))
-    ) : available;
+    ) : (empJobFilter === "Alle" ? available : available.filter(a => a.jobId === empJobFilter));
     const dTop  = filtered[0];
     const dNext = filtered[1];
 
@@ -1327,31 +1335,40 @@ export default function App() {
       const ns   = [...(await db.get("hk_emp_swiped_"+user.email) || []), id];
       await save("hk_emp_swiped_"+user.email, ns, setEmpSwiped);
       if (dir === "right") {
-        const jobId = "emp_" + Date.now();
-        const matchEntry = { candidate:item, job:{ id:jobId, company:user.company||user.name } };
-        const existing   = await db.get("hk_emp_matches_"+user.email) || [];
-        if (!existing.some(m => m.candidate?.email === item.email)) {
+        // Find the actual job the candidate applied for
+        const actualJob = empJobs.find(j => j.id === item.jobId && j.employerId === user.email)
+                       || myJobs[0];
+        const jobId = actualJob?.id || ("emp_" + Date.now());
+        const matchEntry = {
+          candidate: item,
+          job: { id: jobId, title: actualJob?.hiring || actualJob?.title || "", company: user.company || user.name },
+          status: "Neu",
+          matchedAt: new Date().toLocaleDateString("de-DE"),
+        };
+        const existing = await db.get("hk_emp_matches_"+user.email) || [];
+        // Allow one match per candidate per job
+        if (!existing.some(m => m.candidate?.email === item.email && m.job?.id === jobId)) {
           await save("hk_emp_matches_"+user.email, [...existing, matchEntry], setEmpMatches);
           setLastMatch(item); setTimeout(() => setLastMatch(null), 2200);
-          // Also create match entry on the applicant's side so chat works both ways
           const appEmail = item.email;
           if (appEmail) {
             const appJobEntry = {
               id: jobId, employerId: user.email,
               company: user.company || user.name,
-              hiring: user.companyDesc || "",
+              jobTitle: actualJob?.hiring || "",
+              hiring: actualJob?.hiring || user.companyDesc || "",
               avatar: (user.company || user.name || "??").slice(0,2).toUpperCase(),
               color: user.color || ACCENT2,
               bg: "#E6F9F3",
               matchedAt: new Date().toLocaleDateString("de-DE"),
             };
             const existingAppM = await db.get("hk_app_matches_"+appEmail) || [];
-            if (!existingAppM.some(m => m.employerId === user.email)) {
+            if (!existingAppM.some(m => m.employerId === user.email && m.id === jobId)) {
               await db.set("hk_app_matches_"+appEmail, [...existingAppM, appJobEntry]);
             }
-            await addNotif("hk_app_notifs_"+appEmail, setAppNotifs, { icon:"❤️", title:`Match mit ${user.company||user.name}!`, body:"Chat ist jetzt freigeschaltet." });
+            await addNotif("hk_app_notifs_"+appEmail, setAppNotifs, { icon:"❤️", title:`Match mit ${user.company||user.name}!`, body:`Für: ${actualJob?.hiring || "deine Bewerbung"}` });
           }
-          await addNotif("hk_emp_notifs_"+user.email, setEmpNotifs, { icon:"❤️", title:`Match mit ${item.name}!`, body:"Chat ist jetzt freigeschaltet." });
+          await addNotif("hk_emp_notifs_"+user.email, setEmpNotifs, { icon:"❤️", title:`Match mit ${item.name}!`, body:`Für: ${actualJob?.hiring || jobId}` });
         }
       }
     };
@@ -1378,11 +1395,24 @@ export default function App() {
         </div>
 
         {/* Filter bar */}
-        <div style={{padding:"0 20px 8px",flexShrink:0,display:"flex",justifyContent:"space-between",alignItems:"center"}}>
-          <span style={{fontSize:12,fontWeight:600,color:t.text3}}>
-            {filtered.length > 0 ? `${filtered.length} ${isApp ? "Jobs" : "Kandidaten"} für dich` : "Alle gesehen!"}
-          </span>
-          <button onClick={() => setShowFilter(true)} style={{background:"none",border:"none",cursor:"pointer",fontSize:13,fontWeight:700,color:ACCENT,fontFamily:"inherit",padding:0}}>⚙️ Filter</button>
+        <div style={{padding:"0 20px 8px",flexShrink:0}}>
+          <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom: !isApp && myJobs.length > 1 ? 8 : 0}}>
+            <span style={{fontSize:12,fontWeight:600,color:t.text3}}>
+              {filtered.length > 0 ? `${filtered.length} ${isApp ? "Jobs" : "Kandidaten"} für dich` : "Alle gesehen!"}
+            </span>
+            {isApp && <button onClick={() => setShowFilter(true)} style={{background:"none",border:"none",cursor:"pointer",fontSize:13,fontWeight:700,color:ACCENT,fontFamily:"inherit",padding:0}}>⚙️ Filter</button>}
+          </div>
+          {/* Employer: job filter pills */}
+          {!isApp && myJobs.length > 1 && (
+            <div style={{display:"flex",gap:6,overflowX:"auto",paddingBottom:2}}>
+              {[{id:"Alle", hiring:"Alle Stellen"}, ...myJobs].map(j => (
+                <button key={j.id} onClick={() => setEmpJobFilter(j.id)}
+                  style={{flexShrink:0,padding:"5px 12px",borderRadius:20,border:`1.5px solid ${empJobFilter===j.id?ACCENT2:t.border}`,background:empJobFilter===j.id?`${ACCENT2}18`:t.bg3,color:empJobFilter===j.id?ACCENT2:t.text2,fontSize:11,fontWeight:700,cursor:"pointer",fontFamily:"inherit",whiteSpace:"nowrap"}}>
+                  {j.hiring?.slice(0,22) || j.id}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
 
         {/* Card stack */}
@@ -1438,6 +1468,16 @@ export default function App() {
                     <div style={{fontSize:13,color:t.text2,fontWeight:500}}>
                       {isApp ? `${dTop.company} · ${dTop.workType||""}` : `${dTop.jobTitle||"Bewerber"} · ${dTop.location||"–"}`}
                     </div>
+                    {/* Employer: show which job the candidate applied for */}
+                    {!isApp && dTop.jobId && (() => {
+                      const j = empJobs.find(x => x.id === dTop.jobId);
+                      return j ? (
+                        <div style={{display:"inline-flex",alignItems:"center",gap:5,background:`${ACCENT}12`,border:`1px solid ${ACCENT}25`,borderRadius:20,padding:"3px 10px",marginTop:2,width:"fit-content"}}>
+                          <span style={{fontSize:10,fontWeight:700,color:ACCENT}}>Beworben für</span>
+                          <span style={{fontSize:11,fontWeight:800,color:ACCENT}}>{j.hiring?.slice(0,30)}</span>
+                        </div>
+                      ) : null;
+                    })()}
                     <div style={{display:"flex",gap:6,flexWrap:"wrap",marginTop:4}}>
                       {isApp
                         ? [dTop.industry, dTop.level, dTop.location].filter(Boolean).map((tag,i) => (
@@ -1526,7 +1566,7 @@ export default function App() {
           )}
 
           <div style={{fontSize:11,fontWeight:700,color:t.text3,marginBottom:14,letterSpacing:"0.1em",textTransform:"uppercase"}}>
-            {isApp ? "Deine Matches" : "Kandidaten"}
+            {isApp ? "Deine Matches" : "Matches nach Stelle"}
           </div>
 
           {items.length === 0 ? (
@@ -1537,70 +1577,100 @@ export default function App() {
                 {isApp ? "Jobs entdecken" : "Kandidaten finden"}
               </button>
             </div>
-          ) : items.map((m,i) => {
-            const name     = isApp ? (m.company||m.hiring) : (m.candidate?.name||"?");
-            const sub      = isApp ? (m.hiring||"")        : (m.candidate?.jobTitle||"Bewerber");
-            const color    = isApp ? (m.color||ACCENT)     : (m.candidate?.color||ACCENT2);
-            const initials = isApp ? (m.avatar||"??")      : (m.candidate?.initials||"??");
-            const photo    = isApp ? null : m.candidate?.photo;
-            const partner  = isApp ? m.employerId          : m.candidate?.email;
-            const online   = isOnline(partner);
-            const isNew    = !m.lastMsg;
-            const mStatus  = !isApp ? (m.status || "Neu") : null;
-            const mStInfo  = mStatus ? APP_STATUS[mStatus] : null;
-            const hasShared = isApp && m.sharedDocs?.length > 0;
-            return (
-              <div key={i} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 0",borderBottom:`1px solid ${t.border}`}}>
-                {/* Avatar with online indicator */}
-                <div style={{position:"relative",flexShrink:0}}>
-                  <Av src={photo} initials={initials} color={color} size={46} fs={16}/>
-                  {online && <div style={{position:"absolute",bottom:1,right:1,width:11,height:11,borderRadius:"50%",background:ACCENT2,border:`2px solid ${t.bg}`}}/>}
-                </div>
-                {/* Content — click opens chat */}
-                <div onClick={() => { setChatOpen({ id:partner, name, color, avatar:initials, partnerEmail:partner, jobId: isApp ? m.id : m.job?.id }); setScreen(isApp?"app_chat":"emp_chat"); }}
-                  style={{flex:1,minWidth:0,cursor:"pointer"}}>
-                  <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
-                    <div style={{fontSize:15,fontWeight:700,color:t.text}}>{name}</div>
-                    {isNew && <span style={{fontSize:10,fontWeight:700,background:`${ACCENT}15`,color:ACCENT,padding:"2px 7px",borderRadius:20,flexShrink:0}}>Neu</span>}
-                    {mStInfo && mStatus !== "Neu" && (
-                      <span style={{fontSize:10,fontWeight:700,background:mStInfo.bg,color:mStInfo.color,padding:"2px 7px",borderRadius:20,flexShrink:0}}>
-                        {mStInfo.icon} {mStatus}
-                      </span>
-                    )}
+          ) : isApp ? (
+            /* ── Applicant: flat match list ── */
+            items.map((m,i) => {
+              const name     = m.company || m.hiring || "?";
+              const sub      = m.jobTitle || m.hiring || "";
+              const color    = m.color || ACCENT;
+              const initials = m.avatar || "??";
+              const partner  = m.employerId;
+              const online   = isOnline(partner);
+              const isNew    = !m.lastMsg;
+              const hasShared = m.sharedDocs?.length > 0;
+              return (
+                <div key={i} style={{display:"flex",alignItems:"center",gap:12,padding:"12px 0",borderBottom:`1px solid ${t.border}`}}>
+                  <div style={{position:"relative",flexShrink:0}}>
+                    <Av initials={initials} color={color} size={46} fs={16}/>
+                    {online && <div style={{position:"absolute",bottom:1,right:1,width:11,height:11,borderRadius:"50%",background:ACCENT2,border:`2px solid ${t.bg}`}}/>}
                   </div>
-                  <div style={{fontSize:12,color:t.text2,fontWeight:500,whiteSpace:"nowrap",overflow:"hidden",textOverflow:"ellipsis",marginTop:1}}>
-                    {m.lastMsg
-                      ? (m.lastMsg.from === user.email ? "Du: " : "") + m.lastMsg.text
-                      : (sub || "Sag Hallo 👋")}
+                  <div onClick={() => { setChatOpen({ id:partner, name, color, avatar:initials, partnerEmail:partner, jobId:m.id }); setScreen("app_chat"); }}
+                    style={{flex:1,minWidth:0,cursor:"pointer"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                      <span style={{fontSize:15,fontWeight:700,color:t.text}}>{name}</span>
+                      {isNew && <span style={{fontSize:10,fontWeight:700,background:`${ACCENT}15`,color:ACCENT,padding:"2px 7px",borderRadius:20}}>Neu</span>}
+                    </div>
+                    <div style={{fontSize:12,color:t.text2,fontWeight:500,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:1}}>
+                      {m.lastMsg ? (m.lastMsg.from===user.email?"Du: ":"")+m.lastMsg.text : (sub||"Sag Hallo 👋")}
+                    </div>
+                  </div>
+                  <div style={{display:"flex",gap:6,alignItems:"center",flexShrink:0}}>
+                    {hasShared
+                      ? <span style={{fontSize:10,fontWeight:700,color:ACCENT2,background:`${ACCENT2}15`,border:`1px solid ${ACCENT2}30`,borderRadius:8,padding:"4px 8px"}}>📎 geteilt</span>
+                      : <button onClick={e=>{e.stopPropagation();shareDocsWithMatch(m);}} style={{background:"rgba(0,201,167,0.08)",border:"1px solid rgba(0,201,167,0.25)",borderRadius:8,padding:"5px 10px",cursor:"pointer",fontSize:12,fontWeight:700,color:ACCENT2,fontFamily:"inherit"}}>📎 Teilen</button>
+                    }
+                    <button onClick={e=>{e.stopPropagation();handleUnmatch({appEmail:user.email,jobId:m.id,empEmail:m.employerId});}} style={{background:"rgba(255,80,80,0.08)",border:"1px solid rgba(255,80,80,0.2)",borderRadius:8,width:28,height:28,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13}}>✕</button>
+                    <span style={{fontSize:16,color:t.text3}}>›</span>
                   </div>
                 </div>
-                {/* Right actions */}
-                <div style={{display:"flex",gap:6,alignItems:"center",flexShrink:0}}>
-                  {!isApp && (
-                    <button onClick={e => { e.stopPropagation(); setViewApplicant(m.candidate); setShowApplicant(true); }}
-                      style={{background:`${ACCENT2}15`,border:`1px solid ${ACCENT2}30`,borderRadius:8,padding:"5px 10px",cursor:"pointer",fontSize:12,fontWeight:700,color:ACCENT2,fontFamily:"inherit"}}>
-                      Profil
-                    </button>
-                  )}
-                  {isApp && (
-                    <>
-                      {hasShared ? (
-                        <span style={{fontSize:10,fontWeight:700,color:ACCENT2,background:`${ACCENT2}15`,border:`1px solid ${ACCENT2}30`,borderRadius:8,padding:"4px 8px",flexShrink:0}}>📎 geteilt</span>
-                      ) : (
-                        <button onClick={e => { e.stopPropagation(); shareDocsWithMatch(m); }}
-                          style={{background:"rgba(0,201,167,0.08)",border:"1px solid rgba(0,201,167,0.25)",borderRadius:8,padding:"5px 10px",cursor:"pointer",fontSize:12,fontWeight:700,color:ACCENT2,fontFamily:"inherit",flexShrink:0}}>
-                          📎 Teilen
-                        </button>
-                      )}
-                      <button onClick={e => { e.stopPropagation(); handleUnmatch({ appEmail:user.email, jobId:m.id, empEmail:m.employerId }); }}
-                        style={{background:"rgba(255,80,80,0.08)",border:"1px solid rgba(255,80,80,0.2)",borderRadius:8,width:28,height:28,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",fontSize:13}}>✕</button>
-                    </>
-                  )}
-                  <span style={{fontSize:16,color:t.text3}}>›</span>
+              );
+            })
+          ) : (() => {
+            /* ── Employer: matches grouped by job ── */
+            const groups = {};
+            items.forEach(m => {
+              const key = m.job?.id || "other";
+              const label = m.job?.title || m.job?.company || "Stelle";
+              if (!groups[key]) groups[key] = { label, matches:[] };
+              groups[key].matches.push(m);
+            });
+            return Object.entries(groups).map(([jobId, group]) => (
+              <div key={jobId} style={{marginBottom:20}}>
+                {/* Job section header */}
+                <div style={{display:"flex",alignItems:"center",gap:8,padding:"10px 0 8px",borderBottom:`2px solid ${ACCENT2}30`}}>
+                  <div style={{width:28,height:28,borderRadius:8,background:`${ACCENT2}20`,display:"flex",alignItems:"center",justifyContent:"center",fontSize:13}}>💼</div>
+                  <div style={{flex:1}}>
+                    <div style={{fontSize:13,fontWeight:800,color:t.text}}>{group.label}</div>
+                    <div style={{fontSize:11,color:t.text3,fontWeight:500}}>{group.matches.length} Kandidat{group.matches.length!==1?"en":""}</div>
+                  </div>
                 </div>
+                {group.matches.map((m,i) => {
+                  const name     = m.candidate?.name || "?";
+                  const color    = m.candidate?.color || ACCENT2;
+                  const initials = m.candidate?.initials || "??";
+                  const photo    = m.candidate?.photo;
+                  const partner  = m.candidate?.email;
+                  const online   = isOnline(partner);
+                  const isNew    = !m.lastMsg;
+                  const mStatus  = m.status || "Neu";
+                  const mStInfo  = APP_STATUS[mStatus];
+                  return (
+                    <div key={i} style={{display:"flex",alignItems:"center",gap:12,padding:"11px 0",borderBottom:`1px solid ${t.border}`}}>
+                      <div style={{position:"relative",flexShrink:0}}>
+                        <Av src={photo} initials={initials} color={color} size={44} fs={15}/>
+                        {online && <div style={{position:"absolute",bottom:1,right:1,width:10,height:10,borderRadius:"50%",background:ACCENT2,border:`2px solid ${t.bg}`}}/>}
+                      </div>
+                      <div onClick={() => { setChatOpen({ id:partner, name, color, avatar:initials, partnerEmail:partner, jobId:m.job?.id }); setScreen("emp_chat"); }}
+                        style={{flex:1,minWidth:0,cursor:"pointer"}}>
+                        <div style={{display:"flex",alignItems:"center",gap:6,flexWrap:"wrap"}}>
+                          <span style={{fontSize:14,fontWeight:700,color:t.text}}>{name}</span>
+                          {isNew && <span style={{fontSize:10,fontWeight:700,background:`${ACCENT}15`,color:ACCENT,padding:"2px 6px",borderRadius:20}}>Neu</span>}
+                          {mStInfo && mStatus!=="Neu" && <span style={{fontSize:10,fontWeight:700,background:mStInfo.bg,color:mStInfo.color,padding:"2px 6px",borderRadius:20}}>{mStInfo.icon} {mStatus}</span>}
+                        </div>
+                        <div style={{fontSize:12,color:t.text2,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap",marginTop:1}}>
+                          {m.lastMsg ? (m.lastMsg.from===user.email?"Du: ":"")+m.lastMsg.text : (m.candidate?.jobTitle||"Bewerber")}
+                        </div>
+                      </div>
+                      <div style={{display:"flex",gap:5,alignItems:"center",flexShrink:0}}>
+                        <button onClick={e=>{e.stopPropagation();setViewApplicant(m.candidate);setShowApplicant(true);}} style={{background:`${ACCENT2}15`,border:`1px solid ${ACCENT2}30`,borderRadius:8,padding:"5px 9px",cursor:"pointer",fontSize:11,fontWeight:700,color:ACCENT2,fontFamily:"inherit"}}>Profil</button>
+                        <span style={{fontSize:16,color:t.text3}}>›</span>
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
-            );
-          })}
+            ));
+          })()}
         </div>
       </div>
     );
@@ -1723,6 +1793,34 @@ export default function App() {
               </div>
             )}
           </div>
+
+          {/* Employer: Meine Stellen */}
+          {!isApp && (() => {
+            const myJobs = empJobs.filter(j => j.employerId === user.email);
+            if (myJobs.length === 0) return null;
+            return (
+              <div style={{background:t.card,border:`1px solid ${t.border}`,borderRadius:16,padding:"16px",marginBottom:12}}>
+                <div style={{fontSize:13,fontWeight:800,color:t.text,marginBottom:12}}>💼 Meine Stellen</div>
+                {myJobs.map((j,i) => {
+                  const candidates = allApplicants.filter(a => a.jobId === j.id).length;
+                  const matches    = empMatches.filter(m => m.job?.id === j.id).length;
+                  return (
+                    <div key={j.id} style={{display:"flex",alignItems:"center",gap:12,padding:"10px 0",borderBottom:i<myJobs.length-1?`1px solid ${t.border}`:"none"}}>
+                      <div style={{flex:1,minWidth:0}}>
+                        <div style={{fontSize:13,fontWeight:700,color:t.text,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{j.hiring}</div>
+                        <div style={{fontSize:11,color:t.text3,marginTop:2}}>{j.workType} · {j.location}</div>
+                      </div>
+                      <div style={{display:"flex",gap:8,alignItems:"center",flexShrink:0}}>
+                        <span style={{fontSize:11,fontWeight:700,color:t.text3,background:t.bg3,padding:"3px 8px",borderRadius:20}}>👁 {candidates}</span>
+                        <span style={{fontSize:11,fontWeight:700,color:ACCENT2,background:`${ACCENT2}15`,padding:"3px 8px",borderRadius:20}}>❤️ {matches}</span>
+                        <button onClick={() => { setEditJob(j); setShowJobForm(true); }} style={{background:"none",border:"none",cursor:"pointer",fontSize:14,color:t.text3,padding:4}}>✏️</button>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          })()}
 
           {/* Recruiter: Post a Job */}
           {!isApp && (
