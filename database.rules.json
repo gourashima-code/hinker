@@ -1,0 +1,26 @@
+{
+  "rules": {
+    "presence": {
+      ".read": "auth != null",
+      "$key": {
+        ".write": "auth != null"
+      }
+    },
+    "typing": {
+      ".read": "auth != null",
+      "$chatKey": {
+        "$userKey": {
+          ".write": "auth != null"
+        }
+      }
+    },
+    "reading": {
+      ".read": "auth != null",
+      "$chatKey": {
+        "$userKey": {
+          ".write": "auth != null"
+        }
+      }
+    }
+  }
+}
